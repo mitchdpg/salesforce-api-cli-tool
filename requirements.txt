@@ -1,0 +1,2 @@
+simple-salesforce
+python-dotenv
