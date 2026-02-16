@@ -1,4 +1,4 @@
-# Salesforce CLI Tool — OAuth 2.0 Client Credentials (Python)
+# Salesforce API CLI Tool — OAuth 2.0 Client Credentials (Python)
 
 Built a command-line interface to authenticate with Salesforce via OAuth 2.0 Client Credentials Flow and perform CRUD operations on standard objects (Accounts, Contacts, Leads, Opportunities). Includes CSV export functionality. Uses an External Client App with Consumer Key and Consumer Secret — no passwords or security tokens required.
 
