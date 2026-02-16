@@ -94,7 +94,7 @@ Before running the script, you need to verify API permissions and create an Exte
 ## Project Structure
 
 ```
-salesforce-cli-tool/
+salesforce-api-cli-tool/
 ├── salesforce_cli.py     # Interactive CLI for Salesforce operations
 ├── requirements.txt
 ├── .env.example
