@@ -1,2 +1,2 @@
-simple-salesforce
+requests
 python-dotenv

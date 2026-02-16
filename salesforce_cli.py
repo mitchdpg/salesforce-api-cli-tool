@@ -1,51 +1,90 @@
 #!/usr/bin/env python3
 """
-Salesforce CLI Tool
-===================
+Salesforce CLI Tool (OAuth 2.0 Client Credentials)
+===================================================
 A command-line interface for querying and managing Salesforce records.
 Supports CRUD operations on Accounts, Contacts, Leads, and Opportunities.
-Authenticates via username/password with security token.
+Authenticates via OAuth 2.0 Client Credentials Flow using an External Client App.
+No password or security token required — authentication uses Consumer Key and
+Consumer Secret stored in environment variables.
+
+Note: In production, a dedicated API/integration user with limited permissions
+should be configured as the "Run As" user in the External Client App, rather
+than an admin account.
 
 Usage: python3 salesforce_cli.py
 """
 
 import os
-import getpass
 import csv
+import requests
 from datetime import datetime
-from simple_salesforce import Salesforce
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Configuration from environment variables
-SF_USERNAME = os.getenv("SF_USERNAME")
 SF_INSTANCE_URL = os.getenv("SF_INSTANCE_URL")
+SF_CONSUMER_KEY = os.getenv("SF_CONSUMER_KEY")
+SF_CONSUMER_SECRET = os.getenv("SF_CONSUMER_SECRET")
 
 # Supported Salesforce objects
 SUPPORTED_OBJECTS = ["Account", "Contact", "Lead", "Opportunity"]
 
 
-def authenticate() -> Salesforce:
-    """Authenticate to Salesforce and return a session."""
-    if not SF_USERNAME:
-        print("[ERROR] Missing SF_USERNAME environment variable.")
-        print("See .env.example for reference.")
+def authenticate() -> dict:
+    """Authenticate via OAuth 2.0 Client Credentials Flow and return session info."""
+    if not all([SF_INSTANCE_URL, SF_CONSUMER_KEY, SF_CONSUMER_SECRET]):
+        print("[ERROR] Missing environment variables.")
+        print("Set SF_INSTANCE_URL, SF_CONSUMER_KEY, and SF_CONSUMER_SECRET")
+        print("in your .env file. See .env.example for reference.")
         raise SystemExit(1)
 
-    password = getpass.getpass("Enter Salesforce password: ")
-    security_token = getpass.getpass("Enter security token: ")
+    token_url = f"{SF_INSTANCE_URL}/services/oauth2/token"
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": SF_CONSUMER_KEY,
+        "client_secret": SF_CONSUMER_SECRET,
+    }
 
-    sf = Salesforce(
-        username=SF_USERNAME,
-        password=password,
-        security_token=security_token,
-    )
-    return sf
+    response = requests.post(token_url, data=data)
+
+    if response.status_code != 200:
+        error = response.json()
+        print(f"\n[ERROR] Authentication failed: {error.get('error_description', error)}")
+        raise SystemExit(1)
+
+    auth = response.json()
+    return {
+        "access_token": auth["access_token"],
+        "instance_url": auth["instance_url"],
+    }
 
 
-def query_records(sf: Salesforce, sobject: str, limit: int = 10):
+def sf_request(session: dict, method: str, endpoint: str, json_data: dict = None) -> dict:
+    """Make an authenticated request to the Salesforce REST API."""
+    url = f"{session['instance_url']}/services/data/v62.0{endpoint}"
+    headers = {
+        "Authorization": f"Bearer {session['access_token']}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.request(method, url, headers=headers, json=json_data)
+
+    if response.status_code == 204:
+        return {}
+    if response.status_code >= 400:
+        error = response.json()
+        if isinstance(error, list):
+            error = error[0]
+        print(f"\n  [ERROR] {error.get('message', error)}")
+        return None
+
+    return response.json()
+
+
+def query_records(session: dict, sobject: str, limit: int = 10):
     """Query and display records for a given Salesforce object."""
     field_map = {
         "Account": "Id, Name, Industry, Phone, CreatedDate",
@@ -58,14 +97,17 @@ def query_records(sf: Salesforce, sobject: str, limit: int = 10):
     query = f"SELECT {fields} FROM {sobject} LIMIT {limit}"
 
     print(f"\n  Executing: {query}")
-    results = sf.query(query)
+    result = sf_request(session, "GET", f"/query?q={query.replace(' ', '+')}")
 
-    records = results.get("records", [])
+    if not result:
+        return []
+
+    records = result.get("records", [])
     if not records:
         print(f"\n  No {sobject} records found.")
         return records
 
-    print(f"\n  Found {results['totalSize']} record(s):\n")
+    print(f"\n  Found {result['totalSize']} record(s):\n")
     for record in records:
         print(f"  {'─' * 50}")
         for key, value in record.items():
@@ -76,7 +118,7 @@ def query_records(sf: Salesforce, sobject: str, limit: int = 10):
     return records
 
 
-def create_record(sf: Salesforce, sobject: str):
+def create_record(session: dict, sobject: str):
     """Create a new record for a given Salesforce object."""
     field_prompts = {
         "Account": {"Name": "Account name", "Industry": "Industry", "Phone": "Phone"},
@@ -113,12 +155,13 @@ def create_record(sf: Salesforce, sobject: str):
         print("  No data entered. Aborting.")
         return
 
-    result = getattr(sf, sobject).create(data)
-    print(f"\n  ✓ {sobject} created successfully!")
-    print(f"    Record ID: {result['id']}")
+    result = sf_request(session, "POST", f"/sobjects/{sobject}", data)
+    if result:
+        print(f"\n  ✓ {sobject} created successfully!")
+        print(f"    Record ID: {result['id']}")
 
 
-def update_record(sf: Salesforce, sobject: str):
+def update_record(session: dict, sobject: str):
     """Update an existing record by ID."""
     record_id = input(f"\n  Enter {sobject} record ID to update: ").strip()
     if not record_id:
@@ -144,11 +187,12 @@ def update_record(sf: Salesforce, sobject: str):
         print("  No updates entered. Aborting.")
         return
 
-    getattr(sf, sobject).update(record_id, updates)
-    print(f"\n  ✓ {sobject} {record_id} updated successfully!")
+    result = sf_request(session, "PATCH", f"/sobjects/{sobject}/{record_id}", updates)
+    if result is not None:
+        print(f"\n  ✓ {sobject} {record_id} updated successfully!")
 
 
-def delete_record(sf: Salesforce, sobject: str):
+def delete_record(session: dict, sobject: str):
     """Delete a record by ID."""
     record_id = input(f"\n  Enter {sobject} record ID to delete: ").strip()
     if not record_id:
@@ -160,11 +204,12 @@ def delete_record(sf: Salesforce, sobject: str):
         print("  Delete cancelled.")
         return
 
-    getattr(sf, sobject).delete(record_id)
-    print(f"\n  ✓ {sobject} {record_id} deleted successfully!")
+    result = sf_request(session, "DELETE", f"/sobjects/{sobject}/{record_id}")
+    if result is not None:
+        print(f"\n  ✓ {sobject} {record_id} deleted successfully!")
 
 
-def export_to_csv(sf: Salesforce, sobject: str):
+def export_to_csv(session: dict, sobject: str):
     """Export records to a CSV file."""
     field_map = {
         "Account": "Id, Name, Industry, Phone, CreatedDate",
@@ -175,9 +220,12 @@ def export_to_csv(sf: Salesforce, sobject: str):
 
     fields = field_map.get(sobject, "Id, Name")
     query = f"SELECT {fields} FROM {sobject}"
-    results = sf.query_all(query)
-    records = results.get("records", [])
+    result = sf_request(session, "GET", f"/query?q={query.replace(' ', '+')}")
 
+    if not result:
+        return
+
+    records = result.get("records", [])
     if not records:
         print(f"\n  No {sobject} records to export.")
         return
@@ -211,12 +259,12 @@ def select_object() -> str:
 
 def main():
     print("=" * 60)
-    print("Salesforce CLI Tool")
+    print("Salesforce CLI Tool (OAuth 2.0 Client Credentials)")
     print("=" * 60)
 
     # Authenticate
-    print("\n[*] Authenticating to Salesforce...")
-    sf = authenticate()
+    print("\n[*] Authenticating to Salesforce via OAuth 2.0...")
+    session = authenticate()
     print("    ✓ Connected successfully")
 
     while True:
@@ -243,15 +291,15 @@ def main():
 
         if choice == "1":
             limit = input("  Record limit (default 10): ").strip() or "10"
-            query_records(sf, sobject, int(limit))
+            query_records(session, sobject, int(limit))
         elif choice == "2":
-            create_record(sf, sobject)
+            create_record(session, sobject)
         elif choice == "3":
-            update_record(sf, sobject)
+            update_record(session, sobject)
         elif choice == "4":
-            delete_record(sf, sobject)
+            delete_record(session, sobject)
         elif choice == "5":
-            export_to_csv(sf, sobject)
+            export_to_csv(session, sobject)
 
 
 if __name__ == "__main__":
